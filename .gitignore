@@ -1,0 +1,4 @@
+build/
+*.o
+photon_transport_mc
+results/
