@@ -1,4 +1,5 @@
 build/
 *.o
-photon_transport_mc
+photon_transport_mc.cpp
+photon_MC
 results/
