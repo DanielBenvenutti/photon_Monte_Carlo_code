@@ -4,6 +4,12 @@
 #include <random>
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <numeric>
+#include <sstream>
+#include <stdexcept>
+#include <utility>
+#include <vector>
 #include <eigen3/Eigen/Dense>
 
 struct Photon { //Estado do fóton
@@ -107,25 +113,112 @@ Eigen::Vector3d sampleScatteredDirection(const Eigen::Vector3d& oldDirection, do
     return (localToWorld * localDirection).normalized(); //Retorno da direção ponderada pela normal gerada pela base geral
 };
 
+class LegendrePhase { //Amostragem da distribuição do cosseno do ângulo de espalhamento no referencial laboratório reescrita como uma soma de polinômios de Legendre
+private:
+    std::vector<double> beta_;
+    double rejectionBound_ = 1.0;
 
-int main() {
-    Rng rng(123, 0);
+    void validateNonNegative() const {
+        const int gridPoints = 100000;
+        double minimum = std::numeric_limits<double>::infinity();
+        double minimumX = 0.0;
 
-    double meanZ = 0.0;
-    const int samples = 100000;
+        for (int i = 0; i <= gridPoints; i++) {
+            const double x = -1.0 + 2.0 * static_cast<double>(i) / static_cast<double>(gridPoints);
+            const double value = evaluateDistribution(x);
 
-    for(int i = 0; i < samples; i++) {
-        const Eigen::Vector3d d = randomUnitVector(rng);
-        meanZ += d.z();
+            if (value < minimum) {
+                minimum = value;
+                minimumX = x;
+            }
+        }
 
-        if (std::abs(d.norm() - 1.0) > 1.0E-12) {
-            std::cerr << "Direcao nao unitaria\n";
-            return 1;
+        if (minimum < -1.0E-9) {
+            std::ostringstream message;
+            message << "Os coeficientes beta não definem uma densidade angular de espalhamento"
+                    << "não negativa: min D(x) = " << minimum << " em x = " << minimumX << ".";
+            throw std::runtime_error(message.str());
         }
     }
 
-    meanZ /= samples;
-    std::cout << "mean Z = " << meanZ << "\n";
+public:
+    explicit LegendrePhase(std::vector<double> beta)
+        : beta_(std::move(beta)) {
+        if (beta_.empty()) { //Condição de bom comportamento da distribuição angular (deve existir algum coeficiente)
+            throw std::runtime_error("A lista de coeficientes beta não pode ser vazia.");
+        }
+        if (std::abs(beta_.front() - 1.0) > 1.0E-10) { //Condição de bom comportamento da distribuição angular (o primeiro coeficiente deve ser unitário)
+            throw std::runtime_error("A normalização da função de fase exige beta[0] = 1.");
+        }
+
+        rejectionBound_ = std::accumulate(
+            beta_.begin(), beta_.end(), 0.0,
+            [](double sum, double value) { return sum + std::abs(value); } //Função lambda
+        );
+
+        if (!(rejectionBound_ > 0.0)) { //Condição de bom comportamento da distribuição angular (como já tem uma condição para não termos todos coeficientes nulo, aqui serve essencialmente para evitar NaN)
+            throw std::runtime_error("Função de fase degenerada.");
+        }
+        validateNonNegative(); //Condição de bom comportamento da distribuição angular (garante numericamente que a distribuição é maior que zero para todo cosseno de \theta)
+    }
+
+    double sampleCosineFromDistribution(Rng& rng) const {
+        const std::uint64_t maxAttempts = 100000000;
+
+        for (std::uint64_t attempt = 0; attempt < maxAttempts; attempt++) {
+            const double x = 2.0 * rng.uniformOpen01() - 1.0;
+            double evaluationAuxiliary = evaluateDistribution(x);
+
+            if (rng.uniformOpen01() < evaluationAuxiliary / rejectionBound_) { //Método de amostragem por rejeição, rejectionBound_ é um majorante
+                return x;
+            }
+        }
+
+        throw std::runtime_error("Amostragem da função de fase não convergiu, verifique o vetor dos coeficientes beta.");
+    }
+
+    double evaluateDistribution(double x) const {
+        double sum = beta_.front();
+        if (beta_.size() == 1) {
+            return sum; //Parte constante da soma (primeiro termo)
+        }
+
+        double pPrevious = 1.0;
+        double pCurrent = x;
+        sum += beta_[1] * pCurrent; //Parte linear da soma (primeiro + segundo termos)
+
+        for (std::size_t ell = 1; ell + 1 < beta_.size(); ++ell) {
+            const double ellDouble = static_cast<double>(ell);
+            const double pNext = ((2.0 * ellDouble + 1.0) * x * pCurrent - ellDouble * pPrevious) / (ellDouble + 1.0); //Relação de recorrência dos polinômios
+
+            sum += beta_[ell + 1] * pNext; //Restante da soma até o (ell+1)-ésimo termo. "p" representa o polinômio de Legendre
+            pPrevious = pCurrent;
+            pCurrent = pNext;
+        }
+
+        return sum;
+    }
+
+    const std::vector<double>& beta() const {
+        return beta_;
+    }
+};
+
+
+
+int main() {
+    Rng rng(123, 0);
+    LegendrePhase phase({1.0});
+
+    const int samples = 10000000;
+    double meanMu = 0.0;
+
+    for(int i = 0; i < samples; i++) {
+        meanMu += phase.sampleCosineFromDistribution(rng);
+    }
+
+    meanMu /= samples;
+    std::cout << "mean mu = " << meanMu << "\n";
     return 0;
 }
 
