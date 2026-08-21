@@ -314,19 +314,49 @@ struct BatchTally { //Contagem de dados relevantes por execução/batch
     }
 };
 
+void validateZones(const std::vector<Zone>& zones){
+    if(zones.empty()) {
+        throw std::runtime_error("O modelo precisa de pelo menos uma zona radial.");
+    }
+
+    const double tolerance = 1.0E-11;
+    for (std::size_t i = 0; i < zones.size(); i++) {
+        const Zone& zone = zones[i];
+
+        if (zone.rInner < 0.0 || !(zone.rOuter > zone.rInner)) {
+            throw std::runtime_error("Raios inválidos em uma zona radial.");
+        }
+        if (zone.sigmaT < 0.0) {
+            throw std::runtime_error("Seção de choque total não pode ser negativa.");
+        }
+        if (zone.omega < 0.0 || zone.omega > 1.0) {
+            throw std::runtime_error("Albedo é uma probabilidade e por isso deve estar contigo em [0,1].");
+        }
+        if (zone.blackbodyIntensity < 0.0) {
+            throw std::runtime_error("Intensidade de corpo negro não pode ser negativa.");
+        }
+
+        if (i > 0) {
+            const double scale = std::max({ //Obtendo uma escala das dimensões envolvidas para ajustar a tolerância nas checagens, evitando erros de limitação computacional
+                1.0,
+                std::abs(zones[i - 1].rOuter),
+                std::abs(zone.rInner)
+            });
+            if (std::abs(zones[i - 1].rOuter - zone.rInner) > tolerance * scale) {
+                throw std::runtime_error("As zonas radiais devem ser contíguas e ordenadas.");
+            }
+        }
+    }
+};
+
 
 int main() {
-    Config config;
-    std::cout << "zones=" << config.zones.size() << "\n";
-    std::cout << "a=" << config.zones.front().rInner << "\n";
-    std::cout << "a=" << config.zones.back().rOuter << "\n";
+    std::vector<Zone> zones = {{1.0, 2.0, 1.0, 0.5, 0.0},{2.0, 4.0, 0.3, 0.8, 0.0}};
 
-    BatchTally first;
-    BatchTally second;
-    first.collisions = 2;
-    second.collisions = 3;
-    first += second;
-    std::cout << "collision=" << first.collisions << "\n";
+    validateZones(zones);
+    std::cout << "zones=" << zones.size() << "\n";
+    std::cout << "a=" << zones.front().rInner << "\n";
+    std::cout << "a=" << zones.back().rOuter << "\n";
     return 0;
 }
 
