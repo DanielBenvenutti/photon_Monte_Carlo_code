@@ -204,21 +204,129 @@ public:
     }
 };
 
+struct Zone {
+    double rInner = 0.0;
+    double rOuter = 1.0;
+    double sigmaT = 1.0; //Seção de choque macroscópica total da zona
+    double omega = 0.0; //Probabilidade de espalhamento na zona. Ou seja, omega = sigmaS/sigmaT, onde sigmaS é a seção de choque macroscópica de espalhamento da zona
+    double blackbodyIntensity = 0.0; //Associada a emissão de fótons na zona
+};
+
+enum class OuterAngularDistribution { //Controla como fótons da fonte externa entram no domínio
+    Diffuse,
+    Radial
+};
+
+struct Config { //Configuração inicial do problema (passada no main)
+    double rhoInner = 0.0; //Reflexividade nas fronteiras globais
+    double rhoOuter = 0.0;
+    double outerSourceIntensity = 1.0; //Associada a emissão de fótons nas fronteiras
+    double innterSourceIntensity = 0.0;
+    OuterAngularDistribution outerAngular = OuterAngularDistribution::Diffuse;
+    std::vector<double> beta = {1.0};
+    std::vector<Zone> zones = {{1.0, 4.0, 1.0, 0.5, 0.2}};
+    std::uint64_t histories = 10000000; //Número inicial de fótons simulados
+    std::size_t batches = 32; //Semelhante as execuções no GNTIMC, ou seja, divide histories em n execuções, o que representaria n simulações Monte Carlo distintas e assim fornece uma distribuição de parâmetros de saída para uma análise estatística
+    std::size_t threads = 0;
+    std::uint64_t seed = 202607001;
+    std::uint64_t maxEvents = 1000; //Número máximo permitido de passos Monte Carlo por história
+};
+
+enum class SourceKind { //Indica possíveis localizações/tipos das fontes criadas
+    OuterBoundary,
+    InnerBoundary,
+    VolumeZone
+};
+
+struct SourceComponent { //Inicializa uma fonte com algumas de suas características
+    SourceKind kind = SourceKind::OuterBoundary;
+    std::size_t zoneIndex = 0;
+    double strenght = 0.0;
+    double cumulative = 0.0;
+};
+
+struct Model { //Estado físico completo para realizar a simulação com todas as informações necessárias, incluindo dados iniciais passados na estrutura Config
+    std::vector<Zone> zones;
+    double a = 0.0; //Raio global interno (a) e externo (b) do domínio que será obtido de zones.front() e zones.back()
+    double b = 1.0;
+    double rhoInner = 0.0; //Associado a reflexividade das fronteiras
+    double rhoOuter = 0.0;
+    double outerSourceIntensity = 1.0;
+    double innerSourceIntensity = 0.0;
+    OuterAngularDistribution outerAngular = OuterAngularDistribution::Diffuse;
+    LegendrePhase phase;
+    std::vector<SourceComponent> sources; //Vai armazenar as fontes existentes no problema
+    double totalSourceStrength = 0.0;
+    double geometryEpsilon = 1.0E-12; //Evita problemas geométricos para fótons que cruzam ou refletem determinada superfície
+
+    Model(
+        std::vector<Zone> zonesIn,
+        double rhoInnerIn,
+        double rhoOuterIn,
+        double outerSourceIntensityIn,
+        double innerSourceIntensityIn,
+        OuterAngularDistribution outerAngularIn,
+        LegendrePhase phaseIn
+    )
+        : zones(std::move(zonesIn)),
+          a(zones.front().rInner),
+          b(zones.back().rOuter),
+          rhoInner(rhoInnerIn),
+          rhoOuter(rhoOuterIn),
+          outerSourceIntensity(outerSourceIntensityIn),
+          innerSourceIntensity(innerSourceIntensityIn),
+          outerAngular(outerAngularIn),
+          phase(std::move(phaseIn)) {}
+};
+
+struct BatchTally { //Contagem de dados relevantes por execução/batch
+    std::uint64_t histories = 0;
+    std::uint64_t outerIn = 0;
+    std::uint64_t outerOut = 0;
+    std::uint64_t innerIn = 0;
+    std::uint64_t innerOut = 0;
+    std::uint64_t absorbedMedium = 0;
+    std::uint64_t terminatedOuter = 0;
+    std::uint64_t terminatedInner = 0;
+    std::uint64_t killedMaxEvents = 0;
+    std::uint64_t collisions = 0;
+    std::uint64_t scatterings = 0;
+    std::uint64_t outerHits = 0;
+    std::uint64_t innerHits = 0;
+    std::uint64_t interfaceCrossings = 0;
+
+    BatchTally& operator+=(const BatchTally& other) { //Função/Sobrecarga de operador para somar as estatísticas de cada execução/batch
+        histories += other.histories;
+        outerIn += other.outerIn;
+        outerOut += other.outerOut;
+        innerIn += other.innerIn;
+        innerOut += other.innerOut;
+        absorbedMedium += other.absorbedMedium;
+        terminatedOuter += other.terminatedOuter;
+        terminatedInner += other.terminatedInner;
+        killedMaxEvents += other.killedMaxEvents;
+        collisions += other.collisions;
+        scatterings += other.scatterings;
+        outerHits += other.outerHits;
+        innerHits += other.innerHits;
+        interfaceCrossings += other.interfaceCrossings;
+        return *this;
+    }
+};
 
 
 int main() {
-    Rng rng(123, 0);
-    LegendrePhase phase({1.0});
+    Config config;
+    std::cout << "zones=" << config.zones.size() << "\n";
+    std::cout << "a=" << config.zones.front().rInner << "\n";
+    std::cout << "a=" << config.zones.back().rOuter << "\n";
 
-    const int samples = 10000000;
-    double meanMu = 0.0;
-
-    for(int i = 0; i < samples; i++) {
-        meanMu += phase.sampleCosineFromDistribution(rng);
-    }
-
-    meanMu /= samples;
-    std::cout << "mean mu = " << meanMu << "\n";
+    BatchTally first;
+    BatchTally second;
+    first.collisions = 2;
+    second.collisions = 3;
+    first += second;
+    std::cout << "collision=" << first.collisions << "\n";
     return 0;
 }
 
