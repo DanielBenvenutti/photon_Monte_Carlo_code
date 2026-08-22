@@ -257,7 +257,7 @@ struct Model { //Estado físico completo para realizar a simulação com todas a
     LegendrePhase phase;
     std::vector<SourceComponent> sources; //Vai armazenar as fontes existentes no problema
     double totalSourceStrength = 0.0;
-    double geometryEpsilon = 1.0E-12; //Evita problemas geométricos para fótons que cruzam ou refletem determinada superfície
+    double geometryEpsilon = 1.0E-12; //Evita problemas geométricos para fótons que cruzam, refletem ou nascem em determinada superfície
 
     Model(
         std::vector<Zone> zonesIn,
@@ -349,14 +349,82 @@ void validateZones(const std::vector<Zone>& zones){
     }
 };
 
+void buildSources(Model& model) { //Inicializando as fontes no modelo para posteriormente serem amostradas de acordo com sua força (cada fóton inicial vai nascer de uma destas fontes)
+    model.sources.clear();
+    model.totalSourceStrength = 0.0;
+
+    const auto addSource = [&] (SourceKind kind,
+        std::size_t zoneIndex,
+        double strength
+    ) {
+        if (strength <= 0.0) {
+            return;
+        }
+
+        model.totalSourceStrength += strength;
+        model.sources.push_back({
+            kind,
+            zoneIndex,
+            strength,
+            model.totalSourceStrength
+        });
+    };
+
+    addSource( //Adicionando fonte extremo externo
+        SourceKind::OuterBoundary,
+        model.zones.size() - 1,
+        model.b * model.b * model.outerSourceIntensity
+    );
+
+    if (model.a > 0.0) { //Adicionando fonte extremo interno (se existir)
+        addSource(
+            SourceKind::InnerBoundary,
+            0,
+            model.a * model.a * model.innerSourceIntensity
+        );
+    }
+
+    for (std::size_t i = 0; i < model.zones.size(); i++) {
+        const Zone& zone = model.zones[i];
+        const double sigmaA = zone.sigmaT * (1.0 - zone.omega);
+        const double radialIntegral = (std::pow(zone.rOuter, 3) - std::pow(zone.rInner, 3)) / 3.0;
+        const double strength = 4.0 * sigmaA * zone.blackbodyIntensity * radialIntegral;
+        addSource( //Adicionando fonte para cada zona
+            SourceKind::VolumeZone,
+            i,
+            strength);
+    }
+
+    if (!(model.totalSourceStrength > 0.0)) {
+        throw std::runtime_error("A força total das fontes é zero. Ajuste as intensidades no main ou use Ib>0 em alguma zona.");
+    }
+
+    const double minimumWidth = std::accumulate(
+        model.zones.begin(),
+        model.zones.end(),
+        std::numeric_limits<double>::infinity(),
+        [](double current, const Zone& zone) {
+            return std::min(current, zone.rOuter - zone.rInner);
+        }
+    );
+
+    const double roundoffScale = 128.0 * std::numeric_limits<double>::epsilon() * std::max(1.0, model.b); //Ajusta a tolerância geomtrica para evitar problemas com fótons localizados nas fronteiras
+    model.geometryEpsilon = std::max(roundoffScale, 1.0E-12 * minimumWidth);
+    model.geometryEpsilon = std::min(model.geometryEpsilon, 1.0E-8 * minimumWidth);
+;}
+
 
 int main() {
-    std::vector<Zone> zones = {{1.0, 2.0, 1.0, 0.5, 0.0},{2.0, 4.0, 0.3, 0.8, 0.0}};
+    std::vector<Zone> zones = {{1.0, 4.0, 1.0, 0.5, 0.0}};
 
-    validateZones(zones);
-    std::cout << "zones=" << zones.size() << "\n";
-    std::cout << "a=" << zones.front().rInner << "\n";
-    std::cout << "a=" << zones.back().rOuter << "\n";
+    LegendrePhase phase({1.0});
+
+    Model model(zones, 0.0, 0.0, 1.0, 0.0, OuterAngularDistribution::Diffuse, std::move(phase));
+
+    buildSources(model);
+    std::cout << "source = " << model.sources.size() << "\n";
+    std::cout << "total = " << model.totalSourceStrength << "\n";
+    std::cout << "epsilon = " << model.geometryEpsilon << "\n";
     return 0;
 }
 
