@@ -408,23 +408,56 @@ void buildSources(Model& model) { //Inicializando as fontes no modelo para poste
         }
     );
 
-    const double roundoffScale = 128.0 * std::numeric_limits<double>::epsilon() * std::max(1.0, model.b); //Ajusta a tolerância geomtrica para evitar problemas com fótons localizados nas fronteiras
+    const double roundoffScale = 128.0 * std::numeric_limits<double>::epsilon() * std::max(1.0, model.b); //Ajusta a tolerância geométrica para evitar problemas com fótons localizados nas fronteiras
     model.geometryEpsilon = std::max(roundoffScale, 1.0E-12 * minimumWidth);
     model.geometryEpsilon = std::min(model.geometryEpsilon, 1.0E-8 * minimumWidth);
-;}
+};
 
+double distanceToSphere( //A ideia é encontrar para quais deslocamentos, dada a direção (\vec{d}) do fóton, a posição (\vec{x}(s) = \vec{p} + s\vec{d}) deste irá intersectar a esfera testada. Basicamente |\vec{p} + s\vec{d}|^{2} = R^{2}
+    const Eigen::Vector3d& position,
+    const Eigen::Vector3d& direction,
+    double radius,
+    double epsilon
+) {
+    if (!(radius > 0.0)) {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    const double pDotD = position.dot(direction);
+    const double c = position.squaredNorm() - radius * radius;
+    double discriminant = pDotD * pDotD - c; //Bhaskara
+
+    const double scale = std::max({1.0, pDotD * pDotD, std::abs(c)});
+    const double roundoffTolerance = 128.0 * std::numeric_limits<double>::epsilon() * scale; //Ajusta a tolerância geométrica para capturar corretamente fótons que tangenciam a esféra avaliada
+    if (discriminant < 0.0 && discriminant > -roundoffTolerance) {
+        discriminant = 0.0; //Fóton tangencial a superfície da esféra
+    }
+    if (discriminant < 0.0) {
+        return std::numeric_limits<double>::infinity(); //Não existe deslocamento 's' tal que o fóton atravesse a esféra, ou seja, que satisfaça a igualdade |\vec{x}(s)|^{2} = R^{2}
+    }
+
+    const double root = std::sqrt(discriminant);
+    const double first = -pDotD - root; //Primeira raiz
+    const double second = -pDotD + root; //Segunda raiz;
+    const double threshold = 8.0 * epsilon; //Evitar problemas geométricos se distâncias muito pequenas satisfazem a equação relevante, o que poderia induzir que um fóton atravessou novamente a mesma fronteira, e garantir um deslocamento positivo
+
+    double result = std::numeric_limits<double>::infinity();
+    if (first > threshold) { //Além da questão geométrica, as comparações com o threshold garantem que o deslocamento seja positivo. Caso seja negativo, o fóton teria que trocar de direção no deslocamento, o que é impossível
+        result = first;
+    }
+    if (second > threshold) {
+        result = std::min(result, second); //Se ambas raízes são positivas, o fóton eventualmente vai atingir os contornos da esféra em ambas as soluções. Obviamente, o deslocamento escolhido será o menor, já que o fóton vai atingir a superfície primeiro no respectivo deslocamento
+    }
+    return result;
+}
 
 int main() {
-    std::vector<Zone> zones = {{1.0, 4.0, 1.0, 0.5, 0.0}};
+    const Eigen::Vector3d p(0.0, 0.0, 2.0);
+    const Eigen::Vector3d inward(0.0, 0.0, -1.0);
+    const Eigen::Vector3d slideways(1.0, 0.0, 0.0);
 
-    LegendrePhase phase({1.0});
-
-    Model model(zones, 0.0, 0.0, 1.0, 0.0, OuterAngularDistribution::Diffuse, std::move(phase));
-
-    buildSources(model);
-    std::cout << "source = " << model.sources.size() << "\n";
-    std::cout << "total = " << model.totalSourceStrength << "\n";
-    std::cout << "epsilon = " << model.geometryEpsilon << "\n";
+    std::cout << distanceToSphere(p, inward, 1.0, 1.0E-12) << "\n";
+    std::cout << distanceToSphere(p, slideways, 1.0, 1.0E-12) << "\n";
     return 0;
 }
 
