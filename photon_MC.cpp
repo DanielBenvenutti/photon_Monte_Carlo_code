@@ -242,7 +242,7 @@ struct SourceComponent { //Inicializa uma fonte com algumas de suas característ
     SourceKind kind = SourceKind::OuterBoundary;
     std::size_t zoneIndex = 0;
     double strenght = 0.0;
-    double cumulative = 0.0;
+    double cumulative = 0.0; //Usado na amostragem da fonte do fóton inicial
 };
 
 struct Model { //Estado físico completo para realizar a simulação com todas as informações necessárias, incluindo dados iniciais passados na estrutura Config
@@ -372,14 +372,14 @@ void buildSources(Model& model) { //Inicializando as fontes no modelo para poste
 
     addSource( //Adicionando fonte extremo externo
         SourceKind::OuterBoundary,
-        model.zones.size() - 1,
+        model.zones.size() - 1, //Está na última zona
         model.b * model.b * model.outerSourceIntensity
     );
 
     if (model.a > 0.0) { //Adicionando fonte extremo interno (se existir)
         addSource(
             SourceKind::InnerBoundary,
-            0,
+            0, //Está na primeira zona
             model.a * model.a * model.innerSourceIntensity
         );
     }
@@ -451,13 +451,91 @@ double distanceToSphere( //A ideia é encontrar para quais deslocamentos, dada a
     return result;
 }
 
-int main() {
-    const Eigen::Vector3d p(0.0, 0.0, 2.0);
-    const Eigen::Vector3d inward(0.0, 0.0, -1.0);
-    const Eigen::Vector3d slideways(1.0, 0.0, 0.0);
+const SourceComponent& selectSource(const Model& model, Rng& rng) {
+    const double target = rng.uniformOpen01() * model.totalSourceStrength;
 
-    std::cout << distanceToSphere(p, inward, 1.0, 1.0E-12) << "\n";
-    std::cout << distanceToSphere(p, slideways, 1.0, 1.0E-12) << "\n";
+    const auto source = std::lower_bound(
+        model.sources.begin(),
+        model.sources.end(),
+        target,
+        [](const SourceComponent& component, double value) {
+            return component.cumulative < value;
+        }
+    );
+
+    if (source == model.sources.end()) {
+        const double last = model.sources.back().cumulative;
+        constexpr double tolerance = 1.0E-6;
+        if (target <= last + tolerance) {
+            return model.sources.back();
+        }
+        throw std::out_of_range("O valor amostrado excede o valor máximo da distribuição acumulada mais uma tolerância. Revise o código.");
+    }
+    return *source;
+}
+
+Photon launchPhoton(
+    const Model& model,
+    const SourceComponent& source,
+    Rng& rng,
+    BatchTally& tally
+) {
+    Photon photon;
+
+    if (source.kind == SourceKind::OuterBoundary) {
+        const Eigen::Vector3d radialOut = randomUnitVector(rng);
+        photon.position = model.b * radialOut;
+        if (model.outerAngular == OuterAngularDistribution::Diffuse) {
+            photon.direction = sampleCosineWeightedHemisphere(-radialOut, rng);
+        } else {
+            photon.direction = -radialOut;
+        }
+        photon.zoneIndex = model.zones.size() - 1;
+        ++tally.outerIn; //Contabiliza fótons entrando através da superfície extrema externa do domínio (In é o sentido radial do fóton)
+        photon.position += model.geometryEpsilon * photon.direction;
+        return photon;
+    }
+
+    if (source.kind == SourceKind::InnerBoundary) {
+        const Eigen::Vector3d radialOut = randomUnitVector(rng);
+        photon.position = model.a * radialOut;
+        photon.direction = sampleCosineWeightedHemisphere(radialOut, rng);
+        photon.zoneIndex = 0;
+        ++tally.innerOut; //Contabiliza fótons entrando através da superfície extrema interna do domínio (Out é o sentido radial do fóton)
+        photon.position += model.geometryEpsilon * photon.direction;
+        return photon;
+    }
+
+    const Zone& zone = model.zones[source.zoneIndex];
+    const double innerCubed = std::pow(zone.rInner, 3);
+    const double outerCubed = std::pow(zone.rOuter, 3);
+    const double radiusCubed = innerCubed * rng.uniformOpen01() * (outerCubed - innerCubed); //Raio aleatório dentro da casca, definindo uma superfície esférica na qual o fóton estará
+
+    photon.position = std::cbrt(radiusCubed) * randomUnitVector(rng); //Posição aleatória na superfície esférica definida anteriormente
+    photon.direction = randomUnitVector(rng); //Direção inicial do fóton na zona é isotrópica
+    photon.zoneIndex = source.zoneIndex;
+    return photon;
+}
+
+int main() {
+    std::vector<Zone> zones = {{1.0, 4.0, 1.0, 0.5, 0.0}};
+    LegendrePhase phase({1.0});
+    Model model(
+        zones,
+        0.0, 0.0,
+        1.0, 0.0,
+        OuterAngularDistribution::Diffuse,
+        std::move(phase)
+    );
+    buildSources(model);
+
+    Rng rng(123, 0);
+    BatchTally tally;
+    for (int i = 0; i < 5; i++) {
+        const SourceComponent& source = selectSource(model, rng);
+        Photon photon = launchPhoton(model, source, rng, tally);
+        std::cout << photon.position.norm() << " " << photon.direction.norm() << "\n";
+    }
     return 0;
 }
 
