@@ -509,7 +509,7 @@ Photon launchPhoton(
     const Zone& zone = model.zones[source.zoneIndex];
     const double innerCubed = std::pow(zone.rInner, 3);
     const double outerCubed = std::pow(zone.rOuter, 3);
-    const double radiusCubed = innerCubed * rng.uniformOpen01() * (outerCubed - innerCubed); //Raio aleatório dentro da casca, definindo uma superfície esférica na qual o fóton estará
+    const double radiusCubed = innerCubed + rng.uniformOpen01() * (outerCubed - innerCubed); //Raio aleatório dentro da casca, definindo uma superfície esférica na qual o fóton estará
 
     photon.position = std::cbrt(radiusCubed) * randomUnitVector(rng); //Posição aleatória na superfície esférica definida anteriormente
     photon.direction = randomUnitVector(rng); //Direção inicial do fóton na zona é isotrópica
