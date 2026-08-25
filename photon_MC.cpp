@@ -289,6 +289,7 @@ struct BatchTally { //Contagem de dados relevantes por execução/batch
     std::uint64_t terminatedOuter = 0;
     std::uint64_t terminatedInner = 0;
     std::uint64_t killedMaxEvents = 0;
+    std::uint64_t killedInvalidGeometry = 0;
     std::uint64_t collisions = 0;
     std::uint64_t scatterings = 0;
     std::uint64_t outerHits = 0;
@@ -305,6 +306,7 @@ struct BatchTally { //Contagem de dados relevantes por execução/batch
         terminatedOuter += other.terminatedOuter;
         terminatedInner += other.terminatedInner;
         killedMaxEvents += other.killedMaxEvents;
+        killedInvalidGeometry += other.killedInvalidGeometry;
         collisions += other.collisions;
         scatterings += other.scatterings;
         outerHits += other.outerHits;
@@ -517,25 +519,153 @@ Photon launchPhoton(
     return photon;
 }
 
+void simulateHistory(
+    const Model& model,
+    const Config& config,
+    Rng& rng,
+    BatchTally& tally
+) {
+    const SourceComponent& source = selectSource(model, rng);
+    Photon photon = launchPhoton(model, source, rng, tally);
+    double remainingOpticalDepth = rng.opticalDepth();
+
+    for (std::uint64_t event = 0; event < config.maxEvents; ++event){
+        const Zone& zone = model.zones[photon.zoneIndex];
+
+        const double distanceToLower =
+            (zone.rInner > 0.0)
+            ? distanceToSphere(
+                photon.position,
+                photon.direction,
+                zone.rInner,
+                model.geometryEpsilon
+            )
+            : std::numeric_limits<double>::infinity();
+
+        const double distanceToUpper = distanceToSphere(
+            photon.position,
+            photon.direction,
+            zone.rOuter,
+            model.geometryEpsilon
+        );
+
+        const bool hitsLowerInterface = distanceToLower < distanceToUpper; //O fóton atingirá primeiro a superfície associada ao menor dos deslocamentos, por isso é o que interessa
+        const double distanceToInterface = hitsLowerInterface ? distanceToLower : distanceToUpper;
+
+        if (!std::isfinite(distanceToInterface)) {
+            ++tally.killedInvalidGeometry;
+            return;
+        }
+
+        const double opticalDepthToInterface = zone.sigmaT * distanceToInterface; //Este produto (que representa o deslocamento máximo que o fóton pode ter até encontrar uma superfície) permite comparar diretamente com o valor amostrado da exponencial (que representa o deslocamento do fóton no passo)
+        const double comparisonTolerance = 64.0 * std::numeric_limits<double>::epsilon()
+            * std::max({1.0, remainingOpticalDepth, opticalDepthToInterface});
+
+        const bool collisionBeforeInterface = zone.sigmaT > 0.0 && remainingOpticalDepth < opticalDepthToInterface - comparisonTolerance; //Comparação relacionada ao comentário acima
+
+        if (collisionBeforeInterface) {
+            const double collisionDistance = remainingOpticalDepth / zone.sigmaT;
+            photon.position += collisionDistance*photon.direction;
+            ++tally.collisions;
+
+            if (rng.uniformOpen01() < zone.omega) {
+                ++tally.scatterings;
+                const double cosineScatter = model.phase.sampleCosineFromDistribution(rng);
+                photon.direction = sampleScatteredDirection(photon.direction, cosineScatter, rng);
+                remainingOpticalDepth = rng.opticalDepth(); //Já amostra para a próxima colisão, já que remainingOpticalDepth foi inicializado fora do laço dos passos
+                continue; //Para a iteração atual do for e pula para o próximo passo
+            }
+
+            ++tally.absorbedMedium;
+            return; //Fim de história
+        }
+
+        photon.position += distanceToInterface * photon.direction; //O fóton irá parar na próxima superfície/interface, já que o meio terá outras características
+        remainingOpticalDepth = std::max(0.0, remainingOpticalDepth - opticalDepthToInterface); //Já prepara para o próximo passo. Neste modelo, parte da profundidade ótica é "consumida" até encontrar a superfície e a restante é usada na próxima região. Equivale ao modelo usado no transporte de nêutrons
+
+        if (hitsLowerInterface) {
+            if (photon.zoneIndex > 0) {
+                --photon.zoneIndex;
+                ++tally.interfaceCrossings;
+                photon.position += model.geometryEpsilon*photon.direction; //Evitando problemas geométricos que podem estar associados a limitação de computadores, como estar em uma posição que ainda caracterize a zona anterior por estas limitações. Note que, por construção, photon.direction aponta para o centro
+                continue; //Para a iteração atual do for e pula para o próximo passo
+            }
+
+            if (model.a > 0.0) { //Fóton estava na zona válida mais interna do domínio e assim atingiu a superfície extrema interna deste
+                ++tally.innerHits;
+                ++tally.innerIn;
+
+                if (rng.uniformOpen01() < model.rhoInner) { //O fóton pode refletir nas superfícies extremas (de acordo com os rhos)
+                    const Eigen::Vector3d radialOut = photon.position.normalized();
+                    photon.direction = sampleCosineWeightedHemisphere(radialOut, rng);
+                    ++tally.innerOut;
+                    photon.position += model.geometryEpsilon*photon.direction;
+                    if (remainingOpticalDepth <= comparisonTolerance) { //remainingOpticalDepth é essencialmente nulo, considerando a tolerância, e assim amostramos uma nova profundidade
+                        remainingOpticalDepth = rng.opticalDepth();
+                    }
+                    continue; //Para a iteração atual do for e pula para o próximo passo
+                }
+
+                ++tally.terminatedInner; //Fóton escapou pela superfície extrema interna
+                return; //Fim de história
+            }
+        } else {
+            if (photon.zoneIndex + 1 < model.zones.size()) {
+                ++photon.zoneIndex;
+                ++tally.interfaceCrossings;
+                photon.position += model.geometryEpsilon*photon.direction;
+                continue;
+            }
+
+            ++tally.outerHits;
+            ++tally.outerOut;
+
+            if (rng.uniformOpen01() < model.rhoOuter) { //O fóton pode refletir nas superfícies extremas (de acordo com os rhos)
+                const Eigen::Vector3d radialOut = photon.position.normalized();
+                photon.direction = sampleCosineWeightedHemisphere(-radialOut, rng);
+                ++tally.outerIn;
+                photon.position += model.geometryEpsilon*photon.direction;
+                if (remainingOpticalDepth <= comparisonTolerance) {
+                    remainingOpticalDepth = rng.opticalDepth();
+                }
+                continue;
+            }
+
+            ++tally.terminatedOuter; //Fóton escapou pela superfície extrema interna
+            return; //Fim de história
+        }
+    }
+
+    ++tally.killedMaxEvents; //Fóton atingiu o máximo de passos Monte Carlo permitidos para sua história
+}
+
 int main() {
-    std::vector<Zone> zones = {{1.0, 4.0, 1.0, 0.5, 0.0}};
+    Config config;
+    config.maxEvents = 1000;
+
+    std::vector<Zone> zones = {{1.0, 4.0, 0.0, 0.0, 0.0}};
     LegendrePhase phase({1.0});
     Model model(
         zones,
         0.0, 0.0,
         1.0, 0.0,
-        OuterAngularDistribution::Diffuse,
-        std::move(phase)
+        OuterAngularDistribution::Radial,
+        phase
     );
     buildSources(model);
 
-    Rng rng(123, 0);
     BatchTally tally;
-    for (int i = 0; i < 5; i++) {
-        const SourceComponent& source = selectSource(model, rng);
-        Photon photon = launchPhoton(model, source, rng, tally);
-        std::cout << photon.position.norm() << " " << photon.direction.norm() << "\n";
+    Rng rng(123, 0);
+    const std::uint64_t histories = 10000;
+
+    for (std::uint64_t i = 0; i < histories; i++) {
+        simulateHistory(model, config, rng, tally);
     }
+
+    std::cout << "outerIn=" << tally.outerIn << "\n";
+    std::cout << "innerIn=" << tally.innerIn << "\n";
+    std::cout << "R=" << static_cast<double>(tally.outerOut) / tally.outerIn << "\n";
+    std::cout << "T=" << static_cast<double>(tally.innerIn) / tally.outerIn << "\n";
     return 0;
 }
 
