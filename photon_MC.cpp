@@ -598,7 +598,7 @@ void simulateHistory(
                 if (rng.uniformOpen01() < model.rhoInner) { //O fóton pode refletir nas superfícies extremas (de acordo com os rhos)
                     const Eigen::Vector3d radialOut = photon.position.normalized();
                     photon.direction = sampleCosineWeightedHemisphere(radialOut, rng);
-                    ++tally.innerOut;
+                    ++tally.innerOut; //Não estamos contando como uma colisão ou como espalhamento
                     photon.position += model.geometryEpsilon*photon.direction;
                     if (remainingOpticalDepth <= comparisonTolerance) { //remainingOpticalDepth é essencialmente nulo, considerando a tolerância, e assim amostramos uma nova profundidade
                         remainingOpticalDepth = rng.opticalDepth();
@@ -623,7 +623,7 @@ void simulateHistory(
             if (rng.uniformOpen01() < model.rhoOuter) { //O fóton pode refletir nas superfícies extremas (de acordo com os rhos)
                 const Eigen::Vector3d radialOut = photon.position.normalized();
                 photon.direction = sampleCosineWeightedHemisphere(-radialOut, rng);
-                ++tally.outerIn;
+                ++tally.outerIn; //Não estamos contando como uma colisão ou como espalhamento
                 photon.position += model.geometryEpsilon*photon.direction;
                 if (remainingOpticalDepth <= comparisonTolerance) {
                     remainingOpticalDepth = rng.opticalDepth();
@@ -639,9 +639,69 @@ void simulateHistory(
     ++tally.killedMaxEvents; //Fóton atingiu o máximo de passos Monte Carlo permitidos para sua história
 }
 
+BatchTally runBatch(
+    const Model& model,
+    const Config& config,
+    std::size_t batchIndex,
+    std::uint64_t historiesInBatch
+) {
+    BatchTally tally;
+    tally.histories = historiesInBatch;
+    Rng rng(config.seed, batchIndex);
+
+    for (std::uint64_t history = 0; history < historiesInBatch; ++history) {
+        simulateHistory(model, config, rng, tally);
+    }
+
+    return tally;
+}
+
+struct Estimate {
+    double value = std::numeric_limits<double>::quiet_NaN(); //Não atribuindo valor válido algum para as variáveis
+    double standardError = std::numeric_limits<double>::quiet_NaN();
+    std::size_t validBatches = 0;
+};
+
+template <typename Metric> //A ideia é que o objeto metric do tipo genérico Metric, que será detalhado na chamada de estimateFromBatches, retorne um double ou algo que possa ser convertido neste tipo a partir da chamada metric(batch)
+Estimate estimateFromBatches(
+    const std::vector<BatchTally>& batches,
+    double globalValue,
+    Metric metric
+) {
+    std::vector<double> values;
+    values.reserve(batches.size());
+
+    for (const BatchTally& batch : batches) {
+        const double value = metric(batch);
+        if (std::isfinite(value)) {
+            values.push_back(value);
+        }
+    }
+
+    Estimate result;
+    result.value = globalValue; //Parâmetro avaliado considerando todos os batches
+    result.validBatches = values.size();
+    if (values.size() < 2) {
+        return result;
+    }
+
+    const double mean = std::accumulate(values.begin(), values.end(), 0.0) / static_cast<double>(values.size());
+
+    double squaredDeviations = 0.0;
+    for (double value : values) {
+        const double deviation = value - mean;
+        squaredDeviations += deviation * deviation;
+    }
+
+    const double sampleVariance = squaredDeviations / static_cast<double>(values.size() - 1);
+    result.standardError = std::sqrt(sampleVariance / static_cast<double>(values.size())); //Erro padrão do parâmetro avaliado considerando os batches individuais
+    return result;
+}
+
 int main() {
     Config config;
     config.maxEvents = 1000;
+    config.seed = 123;
 
     std::vector<Zone> zones = {{1.0, 4.0, 0.0, 0.0, 0.0}};
     LegendrePhase phase({1.0});
@@ -654,18 +714,27 @@ int main() {
     );
     buildSources(model);
 
-    BatchTally tally;
-    Rng rng(123, 0);
-    const std::uint64_t histories = 10000;
+    BatchTally tally1 = runBatch(model, config, 0, 10000);
+    BatchTally tally2 = runBatch(model, config, 1, 10000);
+    BatchTally tally3 = runBatch(model, config, 2, 10000);
 
-    for (std::uint64_t i = 0; i < histories; i++) {
-        simulateHistory(model, config, rng, tally);
-    }
+    std::vector<BatchTally> batches = {tally1, tally2, tally3};
 
-    std::cout << "outerIn=" << tally.outerIn << "\n";
-    std::cout << "innerIn=" << tally.innerIn << "\n";
-    std::cout << "R=" << static_cast<double>(tally.outerOut) / tally.outerIn << "\n";
-    std::cout << "T=" << static_cast<double>(tally.innerIn) / tally.outerIn << "\n";
+    double transmissivityValue = static_cast<double>(tally1.innerIn + tally2.innerIn + tally3.innerIn) / static_cast<double>(tally1.outerIn + tally2.outerIn + tally3.outerIn);
+
+    const Estimate transmissivity = estimateFromBatches(batches,
+        transmissivityValue,
+        [](const BatchTally& batch) {
+        return (batch.outerIn > 0)
+            ? static_cast<double>(batch.innerIn) / static_cast<double>(batch.outerIn)
+            : std::numeric_limits<double>::quiet_NaN();
+        }
+    );
+
+    std::cout << transmissivity.standardError << "\n";
+    std::cout << transmissivity.validBatches << "\n";
+    std::cout << transmissivity.value << "\n";
+
     return 0;
 }
 
