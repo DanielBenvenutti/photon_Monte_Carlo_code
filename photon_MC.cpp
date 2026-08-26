@@ -698,42 +698,56 @@ Estimate estimateFromBatches(
     return result;
 }
 
+Model makemodel(const Config& config) { //Constrói o modelo com base na configuração inicial e faz todas as checagens necessárias para evitar erros, incluindo validação das zonas, da distribuição angular secundária e das fontes
+    validateZones(config.zones);
+
+    if (config.rhoInner < 0.0 || config.rhoInner > 1.0
+        || config.rhoOuter < 0.0 || config.rhoOuter > 1.0) {
+            throw std::runtime_error("As refletividades rho devem pertencer ao intervalo [0,1].");
+    }
+
+    if (config.outerSourceIntensity < 0.0 || config.innterSourceIntensity < 0.0) {
+        throw std::runtime_error("As intensidades de fonte de fronteira devem ser não negativas.");
+    }
+
+    if (config.histories == 0) {
+        throw std::runtime_error("histories deve ser positivo.");
+    }
+
+    if (config.batches == 0 || config.batches > config.histories) {
+        throw std::runtime_error("batches deve estar entre 1 e o número de histórias.");
+    }
+
+    if (config.maxEvents == 0) {
+        throw std::runtime_error("maxEvents deve ser positivo.");
+    }
+
+    LegendrePhase phase(config.beta);
+    Model model(
+        config.zones,
+        config.rhoInner,
+        config.rhoOuter,
+        config.outerSourceIntensity,
+        config.innterSourceIntensity,
+        config.outerAngular,
+        std::move(phase)
+    );
+
+    buildSources(model);
+    return model;
+}
+
 int main() {
     Config config;
-    config.maxEvents = 1000;
-    config.seed = 123;
+    config.zones = {{1.0, 2.0, 1.0, 0.5, 0.0},{2.0, 4.0, 0.3, 0.8, 0.0}};
+    config.beta = {1.0};
+    config.histories = 100000;
 
-    std::vector<Zone> zones = {{1.0, 4.0, 0.0, 0.0, 0.0}};
-    LegendrePhase phase({1.0});
-    Model model(
-        zones,
-        0.0, 0.0,
-        1.0, 0.0,
-        OuterAngularDistribution::Radial,
-        phase
-    );
-    buildSources(model);
+    Model model = makemodel(config);
 
-    BatchTally tally1 = runBatch(model, config, 0, 10000);
-    BatchTally tally2 = runBatch(model, config, 1, 10000);
-    BatchTally tally3 = runBatch(model, config, 2, 10000);
-
-    std::vector<BatchTally> batches = {tally1, tally2, tally3};
-
-    double transmissivityValue = static_cast<double>(tally1.innerIn + tally2.innerIn + tally3.innerIn) / static_cast<double>(tally1.outerIn + tally2.outerIn + tally3.outerIn);
-
-    const Estimate transmissivity = estimateFromBatches(batches,
-        transmissivityValue,
-        [](const BatchTally& batch) {
-        return (batch.outerIn > 0)
-            ? static_cast<double>(batch.innerIn) / static_cast<double>(batch.outerIn)
-            : std::numeric_limits<double>::quiet_NaN();
-        }
-    );
-
-    std::cout << transmissivity.standardError << "\n";
-    std::cout << transmissivity.validBatches << "\n";
-    std::cout << transmissivity.value << "\n";
+    std::cout << "a=" << model.a << " b=" << model.b << '\n';
+    std::cout << "zones=" << model.zones.size() << '\n';
+    std::cout << "photons=" << config.histories << '\n';
 
     return 0;
 }
