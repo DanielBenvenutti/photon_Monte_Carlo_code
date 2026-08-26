@@ -8,6 +8,8 @@
 #include <numeric>
 #include <sstream>
 #include <stdexcept>
+#include <iomanip>
+#include <string>
 #include <utility>
 #include <vector>
 #include <eigen3/Eigen/Dense>
@@ -737,6 +739,31 @@ Model makemodel(const Config& config) { //Constrói o modelo com base na configu
     return model;
 }
 
+std::string betaToString(const std::vector<double>& beta) {
+    std::ostringstream stream;
+    for (std::size_t i = 0; i < beta.size(); ++i) {
+        if (i > 0) {
+            stream << ",";
+        }
+        stream << std::setprecision(17) << beta[i];
+    }
+    return stream.str();
+}
+
+void printEstimate(const std::string& name, const Estimate& estimate) {
+    std::cout << " " << std::left << std::setw(34) << name << std::right
+    << std::scientific << std::setprecision(8) << estimate.value;
+
+    if (std::isfinite(estimate.standardError)) {
+        std::cout << " SE=" << estimate.standardError
+        << " IC95%=[" << estimate.value - 1.96 * estimate.standardError
+        << ", " << estimate.value + 1.96 * estimate.standardError << "]";
+    } else {
+        std::cout << "SE=indisponível";
+    }
+    std::cout << "\n";
+}
+
 int main() {
     Config config;
     config.zones = {{1.0, 2.0, 1.0, 0.5, 0.0},{2.0, 4.0, 0.3, 0.8, 0.0}};
@@ -745,9 +772,12 @@ int main() {
 
     Model model = makemodel(config);
 
-    std::cout << "a=" << model.a << " b=" << model.b << '\n';
-    std::cout << "zones=" << model.zones.size() << '\n';
-    std::cout << "photons=" << config.histories << '\n';
+    Estimate test;
+    test.standardError = 0.05;
+    test.validBatches = 2;
+    test.value = 100;
+
+    printEstimate("teste", test);
 
     return 0;
 }
