@@ -754,14 +754,14 @@ std::string betaToString(const std::vector<double>& beta) {
 
 void printEstimate(const std::string& name, const Estimate& estimate) {
     std::cout << " " << std::left << std::setw(34) << name << std::right
-    << std::scientific << std::setprecision(8) << estimate.value;
+    << std::scientific << std::setprecision(8) << "Valor Estimado: " << estimate.value;
 
     if (std::isfinite(estimate.standardError)) {
-        std::cout << " SE=" << estimate.standardError
-        << " IC95%=[" << estimate.value - 1.96 * estimate.standardError
+        std::cout << "; Erro Padrão: " << estimate.standardError
+        << "; IC-95%: [" << estimate.value - 1.96 * estimate.standardError
         << ", " << estimate.value + 1.96 * estimate.standardError << "]";
     } else {
-        std::cout << "SE=indisponível";
+        std::cout << "Erro Padrão: indisponível";
     }
     std::cout << "\n";
 }
@@ -773,7 +773,7 @@ int main() {
         // =========================================================
         // CONFIGURACAO DA SIMULACAO - EDITE AQUI
         // =========================================================
-        config.zones = {{1.0, 2.0, 0.0, 0.0, 0.0}};
+        config.zones = {{1.0, 2.0, 1.0, 0.5, 0.0},{2.0, 4.0, 0.3, 0.8, 0.0}};
         config.rhoInner = 0.0;
         config.rhoOuter = 0.0;
         config.outerSourceIntensity = 1.0;
@@ -781,10 +781,10 @@ int main() {
         config.outerAngular = OuterAngularDistribution::Radial;
         config.beta = {1.0};
         config.histories = 1000000;
-        config.batches = 32;
-        config.threads = 0;
-        config.seed = 20260701;
-        config.maxEvents = 1000000;
+        config.batches = 4;
+        config.threads = 2;
+        config.seed = 123;
+        config.maxEvents = 10000;
         // =========================================================
         // CONFIGURACAO DA SIMULACAO - EDITE AQUI
         // =========================================================
@@ -895,32 +895,32 @@ int main() {
         std::cout << std::setprecision(8);
         std::cout << "\n=== Monte Carlo de transporte radiativo esférico ===\n";
         std::cout << "Geometria: "
-            << ((model.a > 0.0) ? "casca oca" : "esféra sólida")
-            << ", a=" << model.a
-            << ", b=" << model.b
-            << ", zonas=" << model.zones.size() << "\n";
-        std::cout << "Fótons/histórias=" << config.histories
-            << ", execuções=" << config.batches
-            << ", threads=" << config.threads
-            << ", seed=" << config.seed << "\n";
-        std::cout << "beta={" << betaToString(model.phase.beta()) << "}\n";
+            << ((model.a > 0.0) ? "Casca Oca" : "Esféra Sólida")
+            << ", a = " << model.a
+            << ", b = " << model.b
+            << ", zonas = " << model.zones.size() << "\n";
+        std::cout << "Fótons/histórias = " << config.histories
+            << ", execuções = " << config.batches
+            << ", threads = " << config.threads
+            << ", seed = " << config.seed << "\n";
+        std::cout << "beta = {" << betaToString(model.phase.beta()) << "}\n";
 
         std::cout << "\nContagens de fótons e eventos:\n";
-        std::cout << " outerIn=" << total.outerIn << "\n";
-        std::cout << " outerOut=" << total.outerOut << "\n";
+        std::cout << " outerIn = " << total.outerIn << "\n";
+        std::cout << " outerOut = " << total.outerOut << "\n";
         if (model.a > 0.0){
-            std::cout << " innerIn=" << total.innerIn << "\n";
-            std::cout << " innerOut=" << total.innerOut << "\n";
+            std::cout << " innerIn = " << total.innerIn << "\n";
+            std::cout << " innerOut = " << total.innerOut << "\n";
         }
-        std::cout << " terminatedOuter=" << total.terminatedOuter << "\n";
-        std::cout << " terminatedInner=" << total.terminatedInner << "\n";
-        std::cout << " killedMaxEvents=" << total.killedMaxEvents << "\n";
-        std::cout << " collisions=" << total.collisions << "\n";
-        std::cout << " scatterings=" << total.scatterings << "\n";
-        std::cout << " absorbedMedium=" << total.absorbedMedium << "\n";
-        std::cout << " interfaceCrossings=" << total.interfaceCrossings << "\n";
+        std::cout << " terminatedOuter = " << total.terminatedOuter << "\n";
+        std::cout << " terminatedInner = " << total.terminatedInner << "\n";
+        std::cout << " killedMaxEvents = " << total.killedMaxEvents << "\n";
+        std::cout << " collisions = " << total.collisions << "\n";
+        std::cout << " scatterings = " << total.scatterings << "\n";
+        std::cout << " absorbedMedium = " << total.absorbedMedium << "\n";
+        std::cout << " interfaceCrossings = " << total.interfaceCrossings << "\n";
 
-        std::cout << "\nFluxos reduzidos apos normalizacao das contagens:\n";
+        std::cout << "\nFluxos reduzidos após normalização das contagens:\n";
         std::cout << " q^-(b) = " << qMinusB << "\n";
         std::cout << " q^+(b) = " << qPlusB << "\n";
         if (model.a > 0.0){
@@ -928,13 +928,13 @@ int main() {
             std::cout << " q^+(a) = " << qPlusA << "\n";
         }
 
-        std::cout << "\nRazoes de fluxo:\n";
+        std::cout << "\nRazões de fluxo:\n";
         printEstimate("R = outerOut/outerIn", reflectivity);
         if (model.a > 0.0) {
             printEstimate("T = innerIn/outerIn", transmissivity);
         }
 
-        std::cout << "\nBalanco terminal/historias = " << terminalFraction << "\n";
+        std::cout << "\nBalanço terminal/histórias = " << terminalFraction << "\n";
         std::cout << "Escala contagem->fonte = " << countToSourceScale << "\n";
         // =========================================================
         // SAÍDA NO TERMINAL - EDITE AQUI
