@@ -5,15 +5,16 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
-#include <thread>
 #include <numeric>
+#include <thread>
 #include <sstream>
 #include <stdexcept>
 #include <iomanip>
 #include <string>
 #include <utility>
 #include <vector>
-#include <eigen3/Eigen/Dense>
+#include <Eigen/Dense>
+#include <Eigen/Geometry>
 
 struct Photon { //Estado do fóton
     Eigen::Vector3d position = Eigen::Vector3d::Zero();
