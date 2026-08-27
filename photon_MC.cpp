@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <thread>
 #include <numeric>
 #include <sstream>
 #include <stdexcept>
@@ -137,7 +138,7 @@ private:
 
         if (minimum < -1.0E-9) {
             std::ostringstream message;
-            message << "Os coeficientes beta não definem uma densidade angular de espalhamento"
+            message << "Os coeficientes beta não definem uma densidade angular de espalhamento "
                     << "não negativa: min D(x) = " << minimum << " em x = " << minimumX << ".";
             throw std::runtime_error(message.str());
         }
@@ -765,31 +766,184 @@ void printEstimate(const std::string& name, const Estimate& estimate) {
 }
 
 int main() {
-    Config config;
-    config.zones = {{1.0, 2.0, 1.0, 0.5, 0.0},{2.0, 4.0, 0.3, 0.8, 0.0}};
-    config.beta = {1.0};
-    config.histories = 100000;
+    try {
+        Config config;
 
-    Model model = makemodel(config);
+        // =========================================================
+        // CONFIGURACAO DA SIMULACAO - EDITE AQUI
+        // =========================================================
+        config.zones = {{1.0, 2.0, 0.0, 0.0, 0.0}};
+        config.rhoInner = 0.0;
+        config.rhoOuter = 0.0;
+        config.outerSourceIntensity = 1.0;
+        config.innterSourceIntensity = 0.0;
+        config.outerAngular = OuterAngularDistribution::Radial;
+        config.beta = {1.0};
+        config.histories = 1000000;
+        config.batches = 32;
+        config.threads = 0;
+        config.seed = 20260701;
+        config.maxEvents = 1000000;
+        // =========================================================
+        // CONFIGURACAO DA SIMULACAO - EDITE AQUI
+        // =========================================================
 
-    Estimate test;
-    test.standardError = 0.05;
-    test.validBatches = 2;
-    test.value = 100;
+        Model model = makemodel(config);
 
-    printEstimate("teste", test);
+        if (config.threads == 0) { //Caso o número de threads especificado seja zero, o código irá automáticamente definir um número de threads utilizados com base na leitura de hardware do computador
+            config.threads = std::max<std::size_t>(1, std::thread::hardware_concurrency());
+        }
+        config.threads = std::min(config.threads, config.batches); //Número de execuções não pode ser menor que o número de threads
 
-    return 0;
+        bool noVolumeAbsorption = true; //Checar se fótons podem ser absorvidos em alguma zona, o que impacta o próximo if
+        for (const Zone& zone : model.zones) {
+            if (zone.sigmaT * (1.0 - zone.omega) > 0.0) {
+                noVolumeAbsorption = false;
+                break;
+            }
+        }
+
+    if (noVolumeAbsorption && model.rhoOuter >= 1.0 && (model.a == 0.0 || model.rhoInner >= 1.0)) {
+            std::cerr << "AVISO: meio sem absorção e fronteiras perfeitamente refletoras. Todas as histórias serão truncadas em maxEvents.\n";
+        }
+
+        std::vector<std::uint64_t> historiesPerBatch(config.batches, config.histories / config.batches); //Cada elemento do vetor (que representa um batch) armazena o número de histórias que serão simuladas no respectivo batch
+        for (std::size_t i = 0; i < config.histories % config.batches; i++){ //Como config.histories / config.batches pode não ser do tipo std::uint64_t, e a divisão retorna este tipo na chamada acima, algumas histórias podem ser ignoradas na criação do vetor "historiesPerBatch". Estas histórias são incorcoporadas nos elementos deste vetor aqui
+            ++historiesPerBatch[i];
+        }
+
+        std::vector<BatchTally> batches(config.batches);
+        std::atomic<std::size_t> nextBatch{0};
+        std::vector<std::thread> workers;
+        workers.reserve(config.threads);
+
+        for (std::size_t thread = 0; thread < config.threads; ++thread) {
+            workers.emplace_back([&]() {
+                while (true) {
+                    const std::size_t batchIndex = nextBatch.fetch_add(1);
+                    if (batchIndex >= config.batches) {
+                        break;
+                    }
+
+                    batches[batchIndex] = runBatch(model, config, batchIndex, historiesPerBatch[batchIndex]);
+                }
+            });
+        }
+
+        for (std::thread& worker : workers) {
+            worker.join(); //Esperar todas as threads terminarem para continuar
+        }
+
+        BatchTally total;
+
+        for (const BatchTally& batch : batches) {
+            total += batch; //Uso da sobrecarga de operador
+        }
+
+        const double reflectivityValue =
+            (total.outerIn > 0)
+            ? static_cast<double>(total.outerOut) / static_cast<double>(total.outerIn)
+            : std::numeric_limits<double>::quiet_NaN();
+
+        const double transmissivityValue =
+            (model.a > 0.0 && total.outerIn > 0)
+            ? static_cast<double>(total.innerIn) / static_cast<double>(total.outerIn)
+            : std::numeric_limits<double>::quiet_NaN();
+
+        const Estimate reflectivity = estimateFromBatches(
+            batches,
+            reflectivityValue,
+            [](const BatchTally& batch) {
+                return  (batch.outerIn > 0)
+                    ? static_cast<double>(batch.outerOut) / static_cast<double>(batch.outerIn)
+                    : std::numeric_limits<double>::quiet_NaN();
+            }
+        );
+
+        const Estimate transmissivity = estimateFromBatches(
+            batches,
+            transmissivityValue,
+            [&](const BatchTally& batch) {
+                return  (model.a > 0.0 && batch.outerIn > 0)
+                    ? static_cast<double>(batch.innerIn) / static_cast<double>(batch.outerIn)
+                    : std::numeric_limits<double>::quiet_NaN();
+            }
+        );
+
+        const double countToSourceScale = model.totalSourceStrength / static_cast<double>(config.histories);
+
+        const double qMinusB = -countToSourceScale * static_cast<double>(total.outerIn) / (2.0 * model.b * model.b);
+        const double qPlusB = countToSourceScale * static_cast<double>(total.outerOut) / (2.0 * model.b * model.b);
+        const double qMinusA = (model.a > 0.0)
+            ? -countToSourceScale * static_cast<double>(total.innerIn) / (2.0 * model.a * model.a)
+            : std::numeric_limits<double>::quiet_NaN();
+        const double qPlusA = (model.a > 0.0)
+            ? countToSourceScale * static_cast<double>(total.innerOut) / (2.0 * model.a * model.a)
+            : std::numeric_limits<double>::quiet_NaN();
+
+        const std::uint64_t terminalHistories = total.absorbedMedium + total.terminatedInner + total.terminatedOuter + total.killedInvalidGeometry + total.killedMaxEvents;
+        if (terminalHistories != total.histories) {
+            throw std::runtime_error("A contagem terminal não coincide com o número de histórias. Cheque o código fonte.");
+        }
+
+        const double terminalFraction = static_cast<double>(terminalHistories) / static_cast<double>(total.histories);
+
+        // =========================================================
+        // SAÍDA NO TERMINAL - EDITE AQUI
+        // =========================================================
+        std::cout << std::setprecision(8);
+        std::cout << "\n=== Monte Carlo de transporte radiativo esférico ===\n";
+        std::cout << "Geometria: "
+            << ((model.a > 0.0) ? "casca oca" : "esféra sólida")
+            << ", a=" << model.a
+            << ", b=" << model.b
+            << ", zonas=" << model.zones.size() << "\n";
+        std::cout << "Fótons/histórias=" << config.histories
+            << ", execuções=" << config.batches
+            << ", threads=" << config.threads
+            << ", seed=" << config.seed << "\n";
+        std::cout << "beta={" << betaToString(model.phase.beta()) << "}\n";
+
+        std::cout << "\nContagens de fótons e eventos:\n";
+        std::cout << " outerIn=" << total.outerIn << "\n";
+        std::cout << " outerOut=" << total.outerOut << "\n";
+        if (model.a > 0.0){
+            std::cout << " innerIn=" << total.innerIn << "\n";
+            std::cout << " innerOut=" << total.innerOut << "\n";
+        }
+        std::cout << " terminatedOuter=" << total.terminatedOuter << "\n";
+        std::cout << " terminatedInner=" << total.terminatedInner << "\n";
+        std::cout << " killedMaxEvents=" << total.killedMaxEvents << "\n";
+        std::cout << " collisions=" << total.collisions << "\n";
+        std::cout << " scatterings=" << total.scatterings << "\n";
+        std::cout << " absorbedMedium=" << total.absorbedMedium << "\n";
+        std::cout << " interfaceCrossings=" << total.interfaceCrossings << "\n";
+
+        std::cout << "\nFluxos reduzidos apos normalizacao das contagens:\n";
+        std::cout << " q^-(b) = " << qMinusB << "\n";
+        std::cout << " q^+(b) = " << qPlusB << "\n";
+        if (model.a > 0.0){
+            std::cout << " q^-(a) = " << qMinusA << "\n";
+            std::cout << " q^+(a) = " << qPlusA << "\n";
+        }
+
+        std::cout << "\nRazoes de fluxo:\n";
+        printEstimate("R = outerOut/outerIn", reflectivity);
+        if (model.a > 0.0) {
+            printEstimate("T = innerIn/outerIn", transmissivity);
+        }
+
+        std::cout << "\nBalanco terminal/historias = " << terminalFraction << "\n";
+        std::cout << "Escala contagem->fonte = " << countToSourceScale << "\n";
+        // =========================================================
+        // SAÍDA NO TERMINAL - EDITE AQUI
+        // =========================================================
+
+        return 0;
+    } catch (const std::exception& error) {
+        std::cerr << "ERRO: " << error.what() << "\n";
+        return 1;
+    }
 }
-
-
-
-
-
-
-
-
-
-
 
 
