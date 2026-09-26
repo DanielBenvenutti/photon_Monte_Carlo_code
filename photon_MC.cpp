@@ -668,7 +668,7 @@ struct Estimate {
 
     double batchMean = std::numeric_limits<double>::quiet_NaN();
     std::array<double, 4> rawMoments{std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN()};
-    double centralMoment2 = std::numeric_limits<double>::quiet_NaN();
+    double centralMoment2 = std::numeric_limits<double>::quiet_NaN(); //Utilizam um desvio em relação à média, o que centraliza a distribuição em torno de zero, e os momentos são então calculados sobre esses valores centralizados
     double centralMoment3 = std::numeric_limits<double>::quiet_NaN();
     double centralMoment4 = std::numeric_limits<double>::quiet_NaN();
     double sampleVariance = std::numeric_limits<double>::quiet_NaN();
@@ -689,33 +689,77 @@ Estimate estimateFromBatches(
     double globalValue,
     Metric metric
 ) {
-    std::vector<double> values;
-    values.reserve(batches.size());
-
-    for (const BatchTally& batch : batches) {
-        const double value = metric(batch);
-        if (std::isfinite(value)) {
-            values.push_back(value);
-        }
-    }
-
     Estimate result;
-    result.value = globalValue; //Parâmetro avaliado considerando todos os batches
-    result.validBatches = values.size();
-    if (values.size() < 2) {
+    result.value = globalValue;
+    if (batches.empty()) {
         return result;
     }
 
-    const double mean = std::accumulate(values.begin(), values.end(), 0.0) / static_cast<double>(values.size());
-
-    double squaredDeviations = 0.0;
-    for (double value : values) {
-        const double deviation = value - mean;
-        squaredDeviations += deviation * deviation;
+    const auto histories = batches.front().histories;
+    if (histories == 0) {
+        throw std::runtime_error("Batch vazio. Se o número de histórias simuladas definido for diferente de zero, cheque o código.");
+    }
+    std::vector<double> values;
+    values.reserve(batches.size());
+    for (const BatchTally& batch : batches) {
+        if (batch.histories != histories) {
+            throw std::runtime_error("Os batches devem ter o mesmo tamanho."); //De fato, isso está redundante, pois já foi feita a checagem na chamada da função makemodel()
+        }
+        const double x = metric(batch); //A métrica avaliada em cada batch é armazenada em x. A forma com que a métrica é calculada é definida via função lambda na chamada da função aqui implementanda
+        if (std::isfinite(x)) { //Exclui eventuais batches cujos resultados de interesse divergiram
+            values.push_back(x);
+        }
+    }
+    result.validBatches = values.size();
+    if (values.size() != batches.size() || values.size() < 2) { //O || aqui também é redundante, pois já foi feita a checagem na chamada da função makemodel()
+        return result; //Atualmente, se algum batche for excluído, a análise estatística da métrica atual não é efetuada. Note que outras métricas ainda podem ser avaliadas, pois essa exclusão não invalida a simulação
     }
 
-    const double sampleVariance = squaredDeviations / static_cast<double>(values.size() - 1);
-    result.standardError = std::sqrt(sampleVariance / static_cast<double>(values.size())); //Erro padrão do parâmetro avaliado considerando os batches individuais
+    const double B = values.size();
+    double sum = 0.0;
+    std::array<double, 4> rawSums{};
+    for (double value : values) {
+        const double x = value;
+        sum += x;
+        double power = x;
+        for (std::size_t k = 0; k < rawSums.size(); ++k) {
+            rawSums[k] += power; //Cálculo das somas associadas a cada momento
+            power *= x;
+        }
+    }
+
+    const double mean = sum / B; //Média amostral
+    result.batchMean = mean;
+    for (std::size_t k = 0; k < rawSums.size(); ++k) {
+        result.rawMoments[k] = rawSums[k] / B; //Cálculo de cada momento bruto
+    }
+
+    result.rawMoments[0] = result.batchMean;
+
+    double sum2 = 0.0;
+    double sum3 = 0.0;
+    double sum4 = 0.0;
+    for (double value: values) {
+        const double d = value - mean;
+        double d2 = d * d; //Cálculo das somas associadas a cada momento centralizado
+        sum2 += d2;
+        sum3 += d2 * d;
+        sum4 += d2 * d2;
+    }
+    const double m2 = sum2 / B; //Cálculo dos momentos centrais usando a média amostral, ao invés da populacional, por isso são estimadores enviesados
+    const double m3 = sum3 / B;
+    const double m4 = sum4 / B;
+    result.centralMoment2 = m2;
+    result.centralMoment3 = m3;
+    result.centralMoment4 = m4;
+    result.sampleVariance = sum2 / (B - 1.0); //Estimador não enviesado de Var(X)
+    result.standardDeviation = std::sqrt(result.sampleVariance); //Estimativa do desvio-padrão da distribuição da métrica avaliada entre os batches
+    result.standardError = std::sqrt(result.sampleVariance / B); //Estimativa do desvio-padrão da distribuição amostral da média que obteríamos ao repetir o experimento com B batches
+    result.uncertaintyBatches = values.size();
+    if (m2 > 0.0) {
+        result.skewness = (m3 / (m2 * std::sqrt(m2)));
+        result.excessKurtosis = (m4 / (m2 * m2) - 3.0);
+    }
     return result;
 }
 
@@ -792,10 +836,22 @@ void printEstimate(const std::string& name, const Estimate& estimate) {
 }
 
 int main() {
-    Estimate estimate;
-    std::cout << "Campos disponíveis: " << estimate.rawMoments.size() << " momentos\n";
-    std::cout << "SE inicial e NaN: " << std::isnan(estimate.standardError) << "\n";
-    return 0;
+    std::vector<BatchTally> batches(4);
+    for (std::size_t j = 0; j < batches.size(); ++j) {
+        batches[j].histories = 10;
+        batches[j].outerOut = j + 1;
+    }
+    const Estimate e = estimateFromBatches(batches, 2.5, [](const BatchTally& batch) {
+            return batch.outerOut;
+        });
+    std::cout << std::setprecision(12);
+    for (double m : e.rawMoments) {
+        std::cout << m << "\t";
+    }
+    std::cout << "\nmedia=" << e.batchMean
+              << " variancia=" << e.sampleVariance
+              << " SE=" << e.standardError
+              << " g1=" << e.skewness
+              << " g2=" << e.excessKurtosis << "\n";
 }
-
 
